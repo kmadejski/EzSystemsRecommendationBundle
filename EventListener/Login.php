@@ -6,21 +6,26 @@
 namespace EzSystems\RecommendationBundle\EventListener;
 
 use eZ\Publish\API\Repository\UserService;
+use eZ\Publish\Core\MVC\Symfony\Event\InteractiveLoginEvent as eZInteractiveLoginEvent;
+use eZ\Publish\Core\MVC\Symfony\MVCEvents;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
 use Symfony\Component\Security\Core\Authorization\AuthorizationChecker;
-use Symfony\Component\Security\Http\Event\InteractiveLoginEvent;
 use Symfony\Component\HttpFoundation\Session\Session;
 use GuzzleHttp\ClientInterface as GuzzleClient;
 use GuzzleHttp\Exception\RequestException;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Security\Http\Event\InteractiveLoginEvent as SymfonyInteractiveLoginEvent;
+use Symfony\Component\Security\Http\SecurityEvents;
 
 /**
  * Sends notification to YooChoose servers when user is logged in.
  */
-class Login
+class Login implements EventSubscriberInterface
 {
     /** @var array */
-    private $options = array();
+    private $options;
 
     /** @var \Symfony\Component\Security\Core\Authorization\AuthorizationChecker */
     private $authorizationChecker;
@@ -63,6 +68,18 @@ class Login
         $this->logger = $logger;
     }
 
+    public static function getSubscribedEvents()
+    {
+        return [
+            MVCEvents::INTERACTIVE_LOGIN => [
+                ['onEzInteractiveLogin', 255]
+            ],
+            SecurityEvents::INTERACTIVE_LOGIN => [
+                ['onSymfonySecurityInteractiveLogin', 255]
+            ]
+        ];
+    }
+
     /**
      * Sets `customerId` option when service is created which allows to
      * inject parameter value according to siteaccess configuration.
@@ -74,7 +91,19 @@ class Login
         $this->options['customerId'] = $value;
     }
 
-    public function onSecurityInteractiveLogin(InteractiveLoginEvent $event)
+    public function onEzInteractiveLogin(eZInteractiveLoginEvent $event)
+    {
+        $this->logger->debug('Process onEzInteractiveLogin');
+        return $this->process($event->getRequest(), $event->getAuthenticationToken());
+    }
+
+    public function onSymfonySecurityInteractiveLogin(SymfonyInteractiveLoginEvent $event)
+    {
+        $this->logger->debug('Process onSymfonySecurityInteractiveLogin');
+        return $this->process($event->getRequest(), $event->getAuthenticationToken());
+    }
+
+    public function process(Request $request, TokenInterface $token)
     {
         if (!$this->authorizationChecker->isGranted('IS_AUTHENTICATED_FULLY') // user has just logged in
             || !$this->authorizationChecker->isGranted('IS_AUTHENTICATED_REMEMBERED') // user has logged in using remember_me cookie
@@ -82,28 +111,28 @@ class Login
             return;
         }
 
-        if (!$event->getRequest()->cookies->has('yc-session-id')) {
-            $event->getRequest()->cookies->set('yc-session-id', $this->session->getId());
+        if (!$request->cookies->has('yc-session-id')) {
+            $request->cookies->set('yc-session-id', $this->session->getId());
         }
 
         $notificationUri = sprintf($this->getNotificationEndpoint() . '%s/%s/%s',
             'login',
-            $event->getRequest()->cookies->get('yc-session-id'),
-            $this->getUser($event->getAuthenticationToken())
+            $request->cookies->get('yc-session-id'),
+            $this->getUser($token)
         );
 
-        if (isset($this->logger)) {
+        if ($this->logger !== null) {
             $this->logger->debug(sprintf('Send login event notification to YooChoose: %s', $notificationUri));
         }
 
         try {
             $response = $this->guzzleClient->get($notificationUri);
 
-            if (isset($this->logger)) {
+            if ($this->logger !== null) {
                 $this->logger->debug(sprintf('Got %s from YooChoose login event notification', $response->getStatusCode()));
             }
         } catch (RequestException $e) {
-            if (isset($this->logger)) {
+            if ($this->logger !== null) {
                 $this->logger->error(sprintf('YooChoose login event notification error: %s', $e->getMessage()));
             }
         }
@@ -136,7 +165,9 @@ class Login
 
         if (is_string($user)) {
             return $user;
-        } elseif (method_exists($user, 'getAPIUser')) {
+        }
+
+        if (method_exists($user, 'getAPIUser')) {
             return $user->getAPIUser()->id;
         }
 
